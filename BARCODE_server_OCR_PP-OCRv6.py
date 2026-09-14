@@ -1064,6 +1064,12 @@ class OCRModel:
 # ========== MAIN ==========
 if __name__ == "__main__":
     print_banner()
+    if KNOWN_BARCODE_CODES:
+        log(f"Known barcode codes loaded: {len(KNOWN_BARCODE_CODES)} from {BARCODE_CODES_PATH}", "SUCCESS")
+    else:
+        log("Known barcode codes: NONE FOUND - every detection will run all rotation "
+            "fallbacks even for a confident match (slow). Put barcode_codes.json next "
+            "to this script or set BARCODE_CODES_FILE.", "WARN")
     effective_cores = _apply_cpu_affinity()
 
     model = OCRModel(effective_cores)
