@@ -14,6 +14,13 @@ import os
 from pathlib import Path
 import sys
 import warnings
+# A frozen (PyInstaller) console has no guaranteed UTF-8 code page
+# (no chcp 65001), so force it here - otherwise the emoji/unicode log
+# lines below can crash with UnicodeEncodeError. Harmless when run as
+# a plain script too.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 warnings.filterwarnings("ignore")
 os.environ["CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -40,7 +47,34 @@ import struct
 import ctypes
 import numpy as np
 import cv2
+
+if getattr(sys, "frozen", False):
+    # PyInstaller-only fixups (no-op / not imported when run as a plain
+    # script). PaddleX's optional-dependency checks use package metadata
+    # lookups that don't resolve inside a frozen bundle even when the
+    # packages are correctly bundled (verified: pyclipper, shapely,
+    # opencv-contrib-python, pypdfium2 are always present here, matching
+    # requirements_ppocr370.txt), so the checks are short-circuited to
+    # "available" instead of disabled outright.
+    import paddlex.utils.deps as _paddlex_deps
+    _real_dep_available = _paddlex_deps.is_dep_available
+    _paddlex_deps.is_dep_available = lambda dep, *a, **kw: (
+        True if dep in {"opencv-contrib-python", "shapely", "pyclipper"}
+        else _real_dep_available(dep, *a, **kw)
+    )
+    _paddlex_deps.is_extra_available = lambda extra: True
+    _paddlex_deps.require_extra = lambda *a, **kw: None
+    _paddlex_deps.require_deps = lambda *a, **kw: None
+
 from paddleocr import PaddleOCR
+
+if getattr(sys, "frozen", False):
+    # PyInstaller's static import analysis misses this dynamic binding;
+    # bind the already-imported real module explicitly.
+    import pyclipper
+    import paddlex.inference.models.text_detection.processors as _text_det_processors
+    _text_det_processors.pyclipper = pyclipper
+
 from datetime import datetime
 import re
 
@@ -1020,19 +1054,41 @@ class OCRModel:
         if raw_summary:
             log(f"Raw OCR: {Colors.BRIGHT_CYAN}{raw_summary}{Colors.RESET}", "OCR")
 
+        best = None
+        known_candidates = []
         if all_candidates:
             # ── Select the best single barcode from all candidates ──
-            # Prefer known codes with highest confidence; fall back to any
-            # highest-confidence candidate. (all_candidates is non-empty
-            # here, so `best` is always found — this branch never falls
-            # through without a result.)
+            # A known production code is trusted from a single sighting.
             known_candidates = [
                 candidate for candidate in all_candidates
                 if has_known_reliable([candidate])
             ]
-            best = max(known_candidates, key=lambda c: c['confidence']) if known_candidates \
-                else max(all_candidates, key=lambda c: c['confidence'])
+            if known_candidates:
+                best = max(known_candidates, key=lambda c: c['confidence'])
+            else:
+                # An UNKNOWN code is accepted only when two independent
+                # stages/orientations agree on the exact same text and at
+                # least one sighting is high-confidence. A single lucky
+                # high-confidence read is not enough: body/chassis-number
+                # plates with no barcode sticker at all commonly contain
+                # some printed word that coincidentally OCRs as a
+                # plausible 3-4 char code (confirmed in the field - e.g.
+                # 'C0SM'/'0PL'/'8I3' picked up from chassis-stamp photos
+                # with no real barcode present, previously reported as a
+                # false OK).
+                by_label = {}
+                for candidate in all_candidates:
+                    by_label.setdefault(candidate['label'], []).append(candidate)
+                confirmed = [
+                    max(group, key=lambda c: c['confidence'])
+                    for group in by_label.values()
+                    if len({c['stage'] for c in group}) >= 2
+                    and max(c['confidence'] for c in group) >= DIRECT_ACCEPT_CONFIDENCE
+                ]
+                if confirmed:
+                    best = max(confirmed, key=lambda c: c['confidence'])
 
+        if best is not None:
             final_label = best['label']
             final_confidence = best['confidence']
 

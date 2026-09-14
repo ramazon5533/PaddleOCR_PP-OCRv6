@@ -13,6 +13,13 @@ Based on V3 (sliding window, weighted deskew, gamma) but:
 import os
 import sys
 import warnings
+# A frozen (PyInstaller) console has no guaranteed UTF-8 code page
+# (no chcp 65001), so force it here - otherwise the emoji/unicode log
+# lines below can crash with UnicodeEncodeError. Harmless when run as
+# a plain script too.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 warnings.filterwarnings("ignore")
 os.environ["CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -39,7 +46,34 @@ import struct
 import ctypes
 import numpy as np
 import cv2
+
+if getattr(sys, "frozen", False):
+    # PyInstaller-only fixups (no-op / not imported when run as a plain
+    # script). PaddleX's optional-dependency checks use package metadata
+    # lookups that don't resolve inside a frozen bundle even when the
+    # packages are correctly bundled (verified: pyclipper, shapely,
+    # opencv-contrib-python, pypdfium2 are always present here, matching
+    # requirements_ppocr370.txt), so the checks are short-circuited to
+    # "available" instead of disabled outright.
+    import paddlex.utils.deps as _paddlex_deps
+    _real_dep_available = _paddlex_deps.is_dep_available
+    _paddlex_deps.is_dep_available = lambda dep, *a, **kw: (
+        True if dep in {"opencv-contrib-python", "shapely", "pyclipper"}
+        else _real_dep_available(dep, *a, **kw)
+    )
+    _paddlex_deps.is_extra_available = lambda extra: True
+    _paddlex_deps.require_extra = lambda *a, **kw: None
+    _paddlex_deps.require_deps = lambda *a, **kw: None
+
 from paddleocr import TextDetection, TextRecognition
+
+if getattr(sys, "frozen", False):
+    # PyInstaller's static import analysis misses this dynamic binding;
+    # bind the already-imported real module explicitly.
+    import pyclipper
+    import paddlex.inference.models.text_detection.processors as _text_det_processors
+    _text_det_processors.pyclipper = pyclipper
+
 from datetime import datetime
 import re
 
