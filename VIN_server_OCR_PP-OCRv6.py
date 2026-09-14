@@ -35,6 +35,8 @@ logging.getLogger("root").setLevel(logging.ERROR)
 import time
 import json
 import socket
+import struct
+import ctypes
 import numpy as np
 import cv2
 from paddleocr import PaddleOCR
@@ -220,20 +222,122 @@ def _log_cpu_diagnostics(cpu_threads, resize_width, use_textline_orientation):
     try:
         import psutil
         physical = psutil.cpu_count(logical=False) or 0
+        affinity = psutil.Process().cpu_affinity()
     except ImportError:
         physical = "N/A (psutil o'rnatilmagan)"
+        affinity = "N/A"
     log(f"CPU: logical={logical}  physical={physical}  cpu_threads={cpu_threads}", "MONITOR")
     log(f"RESIZE_WIDTH={resize_width}  USE_TEXTLINE_ORIENTATION={use_textline_orientation}", "MONITOR")
+    log(f"Active CPU affinity (cores this process may run on): {affinity}", "MONITOR")
+
+
+def _detect_performance_core_logical_ids():
+    """Return the logical CPU indices belonging to the highest
+    EfficiencyClass (Intel Performance-cores on a hybrid 12th/13th/14th
+    gen CPU), or None when this machine has no P/E-core split (uniform
+    CPU) or the info can't be read.
+
+    Uses the official Windows CPU-set API (GetLogicalProcessorInformationEx)
+    so this works on ANY PC the server is installed on, automatically —
+    no per-machine tuning. Important: P-core logical ids are NOT a fixed
+    contiguous range (e.g. on one tested machine they were
+    [0, 1, 10, 11, 12, 13, 22, 23]), so they must always be detected,
+    never hardcoded.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        RELATION_PROCESSOR_CORE = 0
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetLogicalProcessorInformationEx.restype = ctypes.c_bool
+        kernel32.GetLogicalProcessorInformationEx.argtypes = [
+            ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)
+        ]
+
+        buf_len = ctypes.c_ulong(0)
+        kernel32.GetLogicalProcessorInformationEx(RELATION_PROCESSOR_CORE, None, ctypes.byref(buf_len))
+        if buf_len.value == 0:
+            return None
+
+        buf = ctypes.create_string_buffer(buf_len.value)
+        if not kernel32.GetLogicalProcessorInformationEx(RELATION_PROCESSOR_CORE, buf, ctypes.byref(buf_len)):
+            return None
+
+        data = buf.raw
+        efficiency_by_cpu = {}
+        offset = 0
+        while offset < len(data):
+            relationship, size = struct.unpack_from("<II", data, offset)
+            if size == 0:
+                break
+            if relationship == RELATION_PROCESSOR_CORE:
+                _, efficiency_class = struct.unpack_from("<BB", data, offset + 8)
+                group_count, = struct.unpack_from("<H", data, offset + 30)
+                group_offset = offset + 32
+                for _ in range(group_count):
+                    mask, group = struct.unpack_from("<QH", data, group_offset)
+                    for bit in range(64):
+                        if mask & (1 << bit):
+                            efficiency_by_cpu[group * 64 + bit] = efficiency_class
+                    group_offset += 16
+            offset += size
+
+        if not efficiency_by_cpu:
+            return None
+        values = efficiency_by_cpu.values()
+        if max(values) == min(values):
+            return None  # uniform CPU (e.g. most laptops) -> no P/E split
+        top_class = max(values)
+        return sorted(cpu for cpu, eff in efficiency_by_cpu.items() if eff == top_class)
+    except Exception:
+        return None
+
+
+def _apply_cpu_affinity():
+    """Keep heavy OpenMP/MKLDNN inference threads off slow Efficiency-
+    cores. Fully automatic and machine-independent:
+      - Hybrid CPU (P-cores + E-cores present)  -> pinned to P-cores only.
+      - Uniform CPU (laptop / older desktop)     -> untouched, all cores
+        stay available, exactly like before this change.
+    OCR_CPU_AFFINITY can force a specific comma-separated core list
+    instead, but this is rarely needed since detection is automatic.
+
+    Returns the number of logical cores actually usable by this process,
+    so the CPU-thread default below matches the real available hardware
+    on whichever PC the server happens to run on.
+    """
+    total_logical = os.cpu_count() or 1
+    manual = os.environ.get("OCR_CPU_AFFINITY", "").strip()
+    try:
+        import psutil
+        if manual:
+            cores = [int(c) for c in manual.split(",") if c.strip() != ""]
+            psutil.Process().cpu_affinity(cores)
+            log(f"CPU affinity manually pinned to cores: {cores}", "SUCCESS")
+            return len(cores)
+
+        p_cores = _detect_performance_core_logical_ids()
+        if p_cores:
+            psutil.Process().cpu_affinity(p_cores)
+            log(f"Hybrid CPU detected (P-core/E-core) - pinned to Performance-cores: {p_cores}", "SUCCESS")
+            return len(p_cores)
+
+        log("No hybrid P/E-core split detected - using all CPU cores", "INFO")
+        return total_logical
+    except Exception as e:
+        log(f"CPU affinity auto-detect skipped ({e}) - using all CPU cores", "WARN")
+        return total_logical
 
 
 # ========== OCR MODEL ==========
 class OCRModel:
-    def __init__(self):
+    def __init__(self, effective_cpu_count=None):
         log("Initializing PP-OCRv6 medium...", "INFO")
         t0 = time.monotonic()
 
+        base_count = effective_cpu_count or (os.cpu_count() or 1)
         cpu_threads = max(1, int(os.environ.get(
-            "OCR_CPU_THREADS", str(max(1, round((os.cpu_count() or 1) * 0.90)))
+            "OCR_CPU_THREADS", str(max(1, round(base_count * 0.90)))
         )))
         _log_cpu_diagnostics(cpu_threads, RESIZE_WIDTH, USE_TEXTLINE_ORIENTATION)
 
@@ -701,8 +805,9 @@ class OCRModel:
 # ========== MAIN ==========
 if __name__ == "__main__":
     print_banner()
+    effective_cores = _apply_cpu_affinity()
 
-    model = OCRModel()
+    model = OCRModel(effective_cores)
     server = con()
 
     reconnect_count = 0

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -69,6 +71,62 @@ def validate_environment() -> Path:
     return python_exe
 
 
+def _detect_performance_core_logical_ids():
+    """Same detection used inside the VIN/Barcode servers: return the
+    logical CPU indices of the Performance-cores on a hybrid Intel CPU
+    (12th/13th/14th gen), or None on a uniform CPU / if detection fails.
+    Kept in sync with the copy in VIN_server_OCR_PP-OCRv6.py and
+    BARCODE_server_OCR_PP-OCRv6.py.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        RELATION_PROCESSOR_CORE = 0
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetLogicalProcessorInformationEx.restype = ctypes.c_bool
+        kernel32.GetLogicalProcessorInformationEx.argtypes = [
+            ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)
+        ]
+
+        buf_len = ctypes.c_ulong(0)
+        kernel32.GetLogicalProcessorInformationEx(RELATION_PROCESSOR_CORE, None, ctypes.byref(buf_len))
+        if buf_len.value == 0:
+            return None
+
+        buf = ctypes.create_string_buffer(buf_len.value)
+        if not kernel32.GetLogicalProcessorInformationEx(RELATION_PROCESSOR_CORE, buf, ctypes.byref(buf_len)):
+            return None
+
+        data = buf.raw
+        efficiency_by_cpu = {}
+        offset = 0
+        while offset < len(data):
+            relationship, size = struct.unpack_from("<II", data, offset)
+            if size == 0:
+                break
+            if relationship == RELATION_PROCESSOR_CORE:
+                _, efficiency_class = struct.unpack_from("<BB", data, offset + 8)
+                group_count, = struct.unpack_from("<H", data, offset + 30)
+                group_offset = offset + 32
+                for _ in range(group_count):
+                    mask, group = struct.unpack_from("<QH", data, group_offset)
+                    for bit in range(64):
+                        if mask & (1 << bit):
+                            efficiency_by_cpu[group * 64 + bit] = efficiency_class
+                    group_offset += 16
+            offset += size
+
+        if not efficiency_by_cpu:
+            return None
+        values = efficiency_by_cpu.values()
+        if max(values) == min(values):
+            return None
+        top_class = max(values)
+        return sorted(cpu for cpu, eff in efficiency_by_cpu.items() if eff == top_class)
+    except Exception:
+        return None
+
+
 def split_thread_counts() -> tuple[int, int]:
     """Split the CPU budget between the VIN and Barcode processes.
 
@@ -79,8 +137,16 @@ def split_thread_counts() -> tuple[int, int]:
     ~5.5s to ~1.8s the moment concurrent Barcode traffic stopped).
     Splitting one shared budget keeps both processes inside real core
     counts so neither starves the other.
+
+    On a hybrid Intel CPU (P-cores + E-cores), both child processes pin
+    themselves to the SAME Performance-cores (see _apply_cpu_affinity in
+    the server scripts), so the shared budget must be based on the
+    P-core count, not the total logical count which includes the slow
+    E-cores that neither process will actually use.
     """
-    total_threads = max(2, round((os.cpu_count() or 2) * 0.90))
+    p_cores = _detect_performance_core_logical_ids()
+    effective_cores = len(p_cores) if p_cores else (os.cpu_count() or 2)
+    total_threads = max(2, round(effective_cores * 0.90))
     vin_threads = max(1, round(total_threads * 0.55))
     barcode_threads = max(1, total_threads - vin_threads)
     return vin_threads, barcode_threads

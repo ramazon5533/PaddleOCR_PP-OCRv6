@@ -1,15 +1,13 @@
 @echo off
 chcp 65001 >nul
 set "PYTHONUTF8=1"
-rem VIN va Barcode serverlar bitta kompyuterda birga ishlaganda CPU'ni
-rem teng bo'lib olishlari uchun (ikkalasi mustaqil 90%% so'rasa, jami
-rem 180%% oversubscription bo'lib, ikkalasi ham sekinlashadi). Qiymat shu
-rem kompyuterning haqiqiy yadro sonidan (%%NUMBER_OF_PROCESSORS%%) hisoblanadi,
-rem qattiq yozilgan son emas - boshqa kompyuterda ham to'g'ri ishlaydi.
-rem VIN qattiqroq 5s talabga ega bo'lgani uchun toq son qolganda qo'shimcha
-rem yadroni VIN oladi (ceil), Barcode esa floor oladi.
-if not defined OCR_CPU_THREADS set /a "OCR_CPU_THREADS=NUMBER_OF_PROCESSORS/2"
-if "%OCR_CPU_THREADS%"=="0" set "OCR_CPU_THREADS=1"
+rem Thread soni va CPU tanlash endi Python skriptining o'zida avtomatik
+rem hisoblanadi (P-core/E-core gibrid protsessorni Windows API orqali
+rem aniqlab, sekin E-core'larni chetlab o'tadi va shu PC'ning haqiqiy
+rem yadro soniga moslashadi) - shuning uchun bu yerda OCR_CPU_THREADS'ni
+rem oldindan belgilash shart emas. Kerak bo'lsa qo'lda override qilish
+rem uchun shu qatorni oching:
+rem set OCR_CPU_THREADS=8
 
 rem By default, result logs are saved on the SAME drive as this program.
 rem To keep results on a DIFFERENT drive (e.g. program on C:, results on
