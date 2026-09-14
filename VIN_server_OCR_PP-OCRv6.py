@@ -39,7 +39,7 @@ import struct
 import ctypes
 import numpy as np
 import cv2
-from paddleocr import PaddleOCR
+from paddleocr import TextDetection, TextRecognition
 from datetime import datetime
 import re
 
@@ -364,15 +364,25 @@ class OCRModel:
         sys.stdout = open(os.devnull, 'w')
         sys.stderr = open(os.devnull, 'w')
         try:
-            self.ocr = PaddleOCR(
-                lang='en',
-                ocr_version='PP-OCRv6',
-                text_detection_model_name='PP-OCRv6_medium_det',
-                text_recognition_model_name='PP-OCRv6_medium_rec',
-                use_doc_unwarping=False,
-                use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+            # Detection and recognition are two SEPARATE models here
+            # (not the combined PaddleOCR() pipeline) so that
+            # _detect_and_recognize() below can recognize only the text
+            # boxes it needs (widest/most VIN-shaped first) and stop as
+            # soon as a valid VIN is found, instead of always recognizing
+            # every line on a busy spec label (weight, tire pressure,
+            # manufacturer text, ...) - that unconditional full-label
+            # recognition was the main cause of slow (7-10s) detections
+            # on text-heavy labels, independent of CPU/thread tuning.
+            self.det = TextDetection(
+                model_name='PP-OCRv6_medium_det',
                 cpu_threads=cpu_threads,
-                enable_mkldnn=True, # CPU acceleration
+                enable_mkldnn=True,
+                device='cpu',
+            )
+            self.rec = TextRecognition(
+                model_name='PP-OCRv6_medium_rec',
+                cpu_threads=cpu_threads,
+                enable_mkldnn=True,
                 device='cpu',
             )
         finally:
@@ -391,7 +401,9 @@ class OCRModel:
         # Warmup
         log("Running warmup call...", "INFO")
         with Profiler("Warmup OCR call"):
-            self.ocr.predict(np.zeros((64, 320, 3), dtype=np.uint8))
+            warm_img = np.zeros((64, 320, 3), dtype=np.uint8)
+            list(self.det.predict(warm_img))
+            list(self.rec.predict(warm_img))
         log("Warmup complete — model is hot", "SUCCESS")
 
     # ========== PREPROCESSING ==========
@@ -565,12 +577,74 @@ class OCRModel:
                 raw.append(self.clean_text(text))
         return raw
 
+    def _looks_like_vin(self, text, score, score_threshold=0.15):
+        """Cheap check used only to decide whether recognition can stop
+        early - same shape rule as extract_vins, without needing a
+        position."""
+        if score < score_threshold:
+            return False
+        t = self.clean_text(text)
+        for j in range(max(1, len(t) - 15)):
+            sub = t[j:j + 17]
+            if len(sub) == 17 and sub.startswith(VALID_PREFIXES) and VIN_REGEX.fullmatch(sub):
+                return True
+        return any(m.startswith(VALID_PREFIXES) for m in VIN_REGEX.findall(t))
+
+    def _detect_and_recognize(self, image_bgr, stage_label):
+        """Detect all text boxes, then recognize them widest-first and
+        stop as soon as one looks like a VIN.
+
+        A VIN is printed as a single long line, so it is almost always
+        the widest text box on a plate/label - recognizing it first and
+        exiting early avoids wastefully recognizing every other line on
+        a busy spec label (weight, tire pressure, manufacturer text,
+        ...), which was the main cause of slow (7-10s) detections on
+        text-heavy labels, independent of CPU/thread tuning. If nothing
+        VIN-shaped turns up, every remaining box still gets recognized,
+        so accuracy on genuinely hard images is unchanged.
+        """
+        det_result = list(self.det.predict(image_bgr))[0]
+        polys = det_result.get("dt_polys", [])
+        if len(polys) == 0:
+            return [{"rec_texts": [], "rec_scores": [], "det_polys": []}]
+
+        h, w = image_bgr.shape[:2]
+        boxes = []
+        for poly in polys:
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+            boxes.append((x1, y1, x2, y2, poly))
+        order = sorted(range(len(boxes)), key=lambda i: boxes[i][2] - boxes[i][0], reverse=True)
+
+        rec_texts, rec_scores, rec_polys = [], [], []
+        for idx in order:
+            x1, y1, x2, y2, poly = boxes[idx]
+            x1c, y1c = max(0, int(x1)), max(0, int(y1))
+            x2c, y2c = min(w, int(x2)), min(h, int(y2))
+            if x2c <= x1c or y2c <= y1c:
+                continue
+            crop = image_bgr[y1c:y2c, x1c:x2c]
+            rec_result = list(self.rec.predict(crop))[0]
+            text = rec_result.get("rec_text", "")
+            score = float(rec_result.get("rec_score", 0.0))
+            rec_texts.append(text)
+            rec_scores.append(score)
+            rec_polys.append(poly)
+
+            if self._looks_like_vin(text, score):
+                log(f"Early exit ({stage_label}): VIN-shaped match after "
+                    f"{len(rec_texts)}/{len(boxes)} text boxes", "SUCCESS")
+                break
+
+        return [{"rec_texts": rec_texts, "rec_scores": rec_scores, "det_polys": rec_polys}]
+
     def _run_ocr_on(self, image_bgr, stage_label):
         candidates = []
         raw_texts = []
         try:
             with Profiler(f"PaddleOCR ({stage_label})"):
-                result = self.ocr.predict(image_bgr)
+                result = self._detect_and_recognize(image_bgr, stage_label)
             candidates = self.extract_vins(result, stage_label)
             raw_texts = self.collect_raw_texts(result)
         except Exception as e:
