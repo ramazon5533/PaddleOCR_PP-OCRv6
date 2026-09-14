@@ -1,0 +1,352 @@
+============================================================
+ PP-OCRv6 SERVERLARINI SOZLASH VA TEST QILISH QO'LLANMASI
+============================================================
+
+Maqsad:
+  PP-OCRv6 yangi avlod VIN va Barcode modellarini asosiy PP-OCRv4
+  serverlariga tegmasdan alohida sinash, tezlik va sifatni taqqoslash.
+
+PP-OCRv6 test papkasi:
+
+  D:\OCR_System\PaddleOCR_PP-OCRv6
+
+Ishlatiladigan modellar:
+
+  Detection:  PP-OCRv6_medium_det
+  Recognition: PP-OCRv6_medium_rec
+
+Python muhiti:
+
+  D:\OCR_System\.venv_ppocr370\Scripts\python.exe
+
+Kutubxona versiyalari:
+
+  Python          3.11.8, 64-bit
+  PaddleOCR       3.7.0
+  PaddleX         3.7.2
+  PaddlePaddle    3.1.1, CPU
+  NumPy           2.2.6
+  OpenCV          4.10.0
+
+
+MUHIM OGOHLANTIRISH
+------------------------------------------------------------
+PP-OCRv4 va PP-OCRv6 serverlari bir xil portlardan foydalanadi:
+
+  VIN:      127.0.0.1:65432
+  Barcode:  127.0.0.1:65433
+
+Shu sababli PP-OCRv6 ni ishga tushirishdan oldin asosiy PP-OCRv4
+serverlarini to'xtatish shart. Bir portda ikkita server ishlamaydi.
+
+PP-OCRv6 hozircha TEST modelidir. To'liq test natijasi tasdiqlanmasdan
+zavoddagi asosiy PP-OCRv4 serverlarini almashtirmang.
+
+
+1-QADAM. KERAKLI FAYLLARNI TEKSHIRISH
+------------------------------------------------------------
+Quyidagi fayllar mavjud bo'lishi kerak:
+
+  D:\OCR_System\PaddleOCR_PP-OCRv6\VIN_server_OCR_PP-OCRv6.py
+  D:\OCR_System\PaddleOCR_PP-OCRv6\BARCODE_server_OCR_PP-OCRv6.py
+  D:\OCR_System\PaddleOCR_PP-OCRv6\Start_All_PP-OCRv6_Servers.py
+  D:\OCR_System\PaddleOCR_PP-OCRv6\Start_All_PP-OCRv6_Servers.bat
+  D:\OCR_System\PaddleOCR_PP-OCRv6\Start_VIN_PP-OCRv6.bat
+  D:\OCR_System\PaddleOCR_PP-OCRv6\Start_BARCODE_PP-OCRv6.bat
+
+Python muhiti ham mavjud bo'lishi kerak:
+
+  D:\OCR_System\.venv_ppocr370\Scripts\python.exe
+
+
+2-QADAM. VERSIYALARNI TEKSHIRISH
+------------------------------------------------------------
+PowerShell yoki CMD da quyidagi buyruqni bajaring:
+
+  D:\OCR_System\.venv_ppocr370\Scripts\python.exe -c "import sys,paddle,paddleocr,paddlex; print('Python',sys.version.split()[0]); print('PaddlePaddle',paddle.__version__); print('PaddleOCR',paddleocr.__version__); print('PaddleX',paddlex.__version__)"
+
+Natija:
+
+  Python 3.11.8
+  PaddlePaddle 3.1.1
+  PaddleOCR 3.7.0
+  PaddleX 3.7.2
+
+Agar versiyalar boshqacha bo'lsa, PP-OCRv6 testini boshlamang.
+
+
+3-QADAM. ASOSIY PP-OCRv4 SERVERLARINI TO'XTATISH
+------------------------------------------------------------
+Test Helper ichidagi VIN va Barcode "Stop Server" tugmalarini bosing.
+
+Asosiy server konsollari alohida ochilgan bo'lsa, ularni Ctrl+C bilan
+to'xtating yoki konsol oynalarini yoping.
+
+Portlar bo'shligini tekshirish:
+
+  Test-NetConnection 127.0.0.1 -Port 65432
+  Test-NetConnection 127.0.0.1 -Port 65433
+
+Serverlar to'xtatilganda TcpTestSucceeded False chiqishi normal.
+
+
+4-QADAM. PP-OCRv6 SERVERLARINI ISHGA TUSHIRISH
+------------------------------------------------------------
+Ikkala serverni birgalikda ochish uchun:
+
+  D:\OCR_System\PaddleOCR_PP-OCRv6\Start_All_PP-OCRv6_Servers.bat
+
+Faqat VIN serverni ochish uchun:
+
+  D:\OCR_System\PaddleOCR_PP-OCRv6\Start_VIN_PP-OCRv6.bat
+
+Faqat Barcode serverni ochish uchun:
+
+  D:\OCR_System\PaddleOCR_PP-OCRv6\Start_BARCODE_PP-OCRv6.bat
+
+Ikkala serverni sinash uchun odatda Start_All_PP-OCRv6_Servers.bat
+faylidan foydalaning.
+
+
+5-QADAM. BIRINCHI MODEL YUKLANISHI
+------------------------------------------------------------
+PP-OCRv6 birinchi marta ishga tushirilganda quyidagi modellar internetdan
+yuklanishi mumkin:
+
+  PP-OCRv6_medium_det
+  PP-OCRv6_medium_rec
+
+Shu sababli:
+
+  1. PC internetga ulangan bo'lsin.
+  2. Konsol oynasini yopmang.
+  3. Model yuklanishi tugashini kuting.
+  4. "Warmup complete" yozuvi chiqishini kuting.
+  5. Ikkala serverda "Listening" yozuvi chiqishini tekshiring.
+
+Kutiladigan portlar:
+
+  VIN Listening on 127.0.0.1:65432
+  Barcode Listening on 127.0.0.1:65433
+
+Birinchi yuklanish keyingi ishga tushirishlardan uzoqroq bo'lishi mumkin.
+
+
+6-QADAM. TEST HELPER SOZLAMALARI
+------------------------------------------------------------
+Test Helper ni oching va Settings bo'limiga kiring.
+
+VIN uchun:
+
+  Name:
+    VIN - PP-OCRv6
+
+  Path:
+    D:\OCR_System\PaddleOCR_PP-OCRv6
+
+  Script:
+    VIN_server_OCR_PP-OCRv6.py
+
+  Python:
+    D:\OCR_System\.venv_ppocr370\Scripts\python.exe
+
+  Port:
+    65432
+
+Barcode uchun:
+
+  Name:
+    Barcode - PP-OCRv6
+
+  Path:
+    D:\OCR_System\PaddleOCR_PP-OCRv6
+
+  Script:
+    BARCODE_server_OCR_PP-OCRv6.py
+
+  Python:
+    D:\OCR_System\.venv_ppocr370\Scripts\python.exe
+
+  Port:
+    65433
+
+Sozlamalarni saqlang. Agar serverlar Start_All BAT orqali oldindan
+ochilgan bo'lsa, Test Helper ularni "existing server" sifatida ko'rishi
+kerak.
+
+
+7-QADAM. PORTLARNI TEKSHIRISH
+------------------------------------------------------------
+PP-OCRv6 serverlar ishga tushgandan so'ng PowerShell da bajaring:
+
+  Test-NetConnection 127.0.0.1 -Port 65432
+  Test-NetConnection 127.0.0.1 -Port 65433
+
+Har ikkala port uchun:
+
+  TcpTestSucceeded : True
+
+chiqishi kerak.
+
+
+8-QADAM. TO'G'RI TEST TARTIBI
+------------------------------------------------------------
+PP-OCRv4 va PP-OCRv6 ni aynan bir xil rasmlarda sinang.
+
+Tavsiya etilgan tartib:
+
+  1. PP-OCRv4 bilan test papkasini to'liq tekshiring.
+  2. Test logini alohida nom bilan saqlang.
+  3. PP-OCRv4 serverlarini to'xtating.
+  4. PP-OCRv6 serverlarini ishga tushiring.
+  5. Warmup tugashini kuting.
+  6. Xuddi shu test papkasini PP-OCRv6 bilan tekshiring.
+  7. PP-OCRv6 logini alohida saqlang.
+  8. Natijalarni taqqoslang.
+
+VIN va Barcode testlarini alohida baholang.
+
+
+9-QADAM. NIMALARNI TAQQOSLASH KERAK
+------------------------------------------------------------
+Har bir model uchun quyidagilarni yozib boring:
+
+  - jami rasmlar soni;
+  - OK soni;
+  - NG soni;
+  - yolg'on OK soni;
+  - ko'rinib turgan yozuvni topolmagan holatlar;
+  - noto'g'ri belgi almashtirishlari;
+  - bitta rasmning o'rtacha vaqti;
+  - 5 sekunddan oshgan rasmlar soni;
+  - eng sekin rasm vaqti;
+  - CPU va RAM ishlatilishi.
+
+Eng muhim qoida:
+
+  Yolg'on OK qabul qilinmaydi. PP-OCRv6 ko'proq matn topsa ham,
+  noto'g'ri qiymatni OK qilib yuborsa, bu jiddiy kamchilik hisoblanadi.
+
+
+10-QADAM. PP-OCRv6 MEDIUM TEZLIGI HAQIDA
+------------------------------------------------------------
+PP-OCRv6 medium aniqlikka yo'naltirilgan model. Hozirgi PP-OCRv4 server
+quyidagi aralash juftlikdan foydalanadi:
+
+  PP-OCRv4_server_det
+  PP-OCRv4_mobile_rec
+
+PP-OCRv6 test server esa:
+
+  PP-OCRv6_medium_det
+  PP-OCRv6_medium_rec
+
+dan foydalanadi. Shuning uchun PP-OCRv6 ayrim PClarda ko'proq RAM yoki
+CPU talab qilishi mumkin. Faqat warmup natijasiga qarab xulosa qilmang;
+real zavod rasmlarida to'liq test o'tkazing.
+
+
+11-QADAM. SERVERNI TO'XTATISH
+------------------------------------------------------------
+Start_All oynasida Ctrl+C bosing. Boshqaruvchi VIN va Barcode serverlarini
+to'xtatadi.
+
+Alohida BAT fayllari orqali ochilgan bo'lsa, har bir server konsolida
+Ctrl+C bosing.
+
+Keyin portlar yopilganini tekshiring:
+
+  Test-NetConnection 127.0.0.1 -Port 65432
+  Test-NetConnection 127.0.0.1 -Port 65433
+
+
+12-QADAM. ASOSIY PP-OCRv4 GA QAYTISH
+------------------------------------------------------------
+1. PP-OCRv6 serverlarining barchasini to'xtating.
+2. D:\OCR_System\Start_All_OCR_Servers.bat faylini oching.
+3. Konsollarda PP-OCRv4 model nomlari va Listening yozuvlarini tekshiring.
+4. Test Helper Settings ichida kerak bo'lsa scriptlarni qaytaring:
+
+   VIN:
+     D:\OCR_System\VIN_server_OCR.py
+
+   Barcode:
+     D:\OCR_System\BARCODE_server_OCR.py
+
+   Python:
+     D:\OCR_System\.venv_ppocr370\Scripts\python.exe
+
+   Portlar:
+     VIN 65432
+     Barcode 65433
+
+PP-OCRv6 sinovi asosiy PP-OCRv4 fayllarini o'zgartirmaydi.
+
+
+13-QADAM. YANGI PC GA KO'CHIRISH
+------------------------------------------------------------
+Avval asosiy qo'llanmadagi yangi PC ni noldan tayyorlash qadamlarini
+bajaring:
+
+  D:\OCR_System\YANGI_PC_0_DAN_ORNATISH_QOLLANMASI.txt
+
+Keyin yangi PC ga ushbu papkani to'liq ko'chiring:
+
+  D:\OCR_System\PaddleOCR_PP-OCRv6
+
+.venv_ppocr370 virtual muhitini eski PC dan ko'chirmang. Yangi PC ning
+o'zida requirements_ppocr370.txt orqali yarating.
+
+PP-OCRv6 serverini birinchi marta internet bilan ishga tushirib, modellar
+to'liq yuklanishi va warmup tugashini kuting.
+
+
+14-QADAM. KENG TARQALGAN XATOLAR
+------------------------------------------------------------
+Xato: The system cannot find the path specified
+  Sabab: .venv_ppocr370 D:\OCR_System ichida mavjud emas yoki papka
+  boshqa manzilga ko'chirilgan.
+  Yechim: quyidagi fayl mavjudligini tekshiring:
+    D:\OCR_System\.venv_ppocr370\Scripts\python.exe
+
+Xato: port 65432 yoki 65433 band
+  Sabab: asosiy PP-OCRv4 yoki boshqa PP-OCRv6 server allaqachon ishlayapti.
+  Yechim: avvalgi serverni to'xtating. Serverni ikki marta ochmang.
+
+Xato: No module named paddleocr
+  Sabab: noto'g'ri Python tanlangan yoki paketlar o'rnatilmagan.
+  Yechim: aynan ushbu Python ishlatilayotganini tekshiring:
+    D:\OCR_System\.venv_ppocr370\Scripts\python.exe
+
+Birinchi ishga tushirish uzoq davom etadi
+  Sabab: PP-OCRv6 medium modellar yuklanmoqda.
+  Yechim: internetni va konsolni yopmang; yuklanish tugashini kuting.
+
+Natijalar PP-OCRv4 dan farq qiladi
+  Sabab: PP-OCRv6 boshqa model avlodi va arxitekturasidir.
+  Yechim: bu normal test natijasi. To'liq loglarni taqqoslang va zavodga
+  o'tkazishdan oldin sifat/tezlik mezonlarini tasdiqlang.
+
+
+15-QADAM. PP-OCRv6 NI QABUL QILISH CHECKLIST
+------------------------------------------------------------
+  [ ] Asosiy PP-OCRv4 server fayllari o'zgarmagan
+  [ ] PaddleOCR 3.7.0 ishlayapti
+  [ ] PP-OCRv6_medium_det yuklangan
+  [ ] PP-OCRv6_medium_rec yuklangan
+  [ ] VIN port 65432 ishlayapti
+  [ ] Barcode port 65433 ishlayapti
+  [ ] Bir xil test rasmlari ishlatilgan
+  [ ] VIN natijalari solishtirilgan
+  [ ] Barcode natijalari solishtirilgan
+  [ ] Yolg'on OK holatlari yo'q
+  [ ] NG soni qabul qilinadigan darajada
+  [ ] O'rtacha vaqt qabul qilinadigan darajada
+  [ ] 5 sekunddan oshgan holatlar tekshirilgan
+  [ ] Log fayllari saqlangan
+  [ ] Zavodga o'tkazish qarori testdan keyin qabul qilingan
+
+
+============================================================
+ PP-OCRv6 SETTING VA TEST QO'LLANMASI TUGADI
+============================================================
