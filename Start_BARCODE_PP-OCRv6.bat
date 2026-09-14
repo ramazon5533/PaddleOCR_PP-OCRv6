@@ -1,12 +1,11 @@
 @echo off
 chcp 65001 >nul
 set "PYTHONUTF8=1"
-rem Thread soni va CPU tanlash endi Python skriptining o'zida avtomatik
-rem hisoblanadi (P-core/E-core gibrid protsessorni Windows API orqali
-rem aniqlab, sekin E-core'larni chetlab o'tadi va shu PC'ning haqiqiy
-rem yadro soniga moslashadi) - shuning uchun bu yerda OCR_CPU_THREADS'ni
-rem oldindan belgilash shart emas. Kerak bo'lsa qo'lda override qilish
-rem uchun shu qatorni oching:
+rem Thread count and CPU selection are now computed automatically inside
+rem the Python script itself (it detects a hybrid P-core/E-core CPU via
+rem the Windows API, avoids the slow E-cores, and adapts to this PC's
+rem real core count) - so OCR_CPU_THREADS does not need to be preset
+rem here. To override manually, uncomment the line below:
 rem set OCR_CPU_THREADS=8
 
 rem By default, result logs are saved on the SAME drive as this program.
@@ -19,8 +18,8 @@ cd /d "%~dp0"
 set "PYTHON_EXE=%~dp0..\.venv_ppocr370\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%~dp0..\..\.venv_ppocr370\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" (
-    echo [ERROR] .venv_ppocr370 Python topilmadi.
-    echo Kutilgan joy: %~dp0..\.venv_ppocr370\Scripts\python.exe
+    echo [ERROR] .venv_ppocr370 Python not found.
+    echo Expected location: %~dp0..\.venv_ppocr370\Scripts\python.exe
     pause
     exit /b 1
 )

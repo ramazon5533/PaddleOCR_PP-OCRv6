@@ -68,10 +68,18 @@ if not exist "%BASE%\PaddleOCR_PP-OCRv6\VIN_server_OCR_PP-OCRv6.py" (
     pause
     exit /b 1
 )
-if not exist "%BASE%\barcode_codes.json" (
-    echo [WARN] Not found: %BASE%\barcode_codes.json
-    echo The Barcode server will still run, but its known-code list will be empty.
-    echo Copy barcode_codes.json into %BASE% if it is available.
+if not exist "%BASE%\PaddleOCR_PP-OCRv6\barcode_codes.json" (
+    if exist "%BASE%\barcode_codes.json" (
+        echo   NOTE: barcode_codes.json found one folder up ^(%BASE%^) - that still
+        echo   works, but copying it into %BASE%\PaddleOCR_PP-OCRv6\ instead is safer
+        echo   since it travels with the folder if this PC's files are ever moved.
+    ) else (
+        echo [WARN] Not found: %BASE%\PaddleOCR_PP-OCRv6\barcode_codes.json
+        echo The Barcode server will still run, but its known-code list will be
+        echo empty, which makes EVERY detection run all rotation fallbacks
+        echo ^(slower, but not incorrect^). Copy barcode_codes.json into
+        echo %BASE%\PaddleOCR_PP-OCRv6\ if it is available.
+    )
 )
 echo   OK - project files found.
 echo.

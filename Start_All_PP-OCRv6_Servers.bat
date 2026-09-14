@@ -7,8 +7,8 @@ set "PYTHON_EXE=%~dp0..\.venv_ppocr370\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%~dp0..\..\.venv_ppocr370\Scripts\python.exe"
 
 if not exist "%PYTHON_EXE%" (
-    echo [ERROR] .venv_ppocr370 Python topilmadi.
-    echo Kutilgan joy: %~dp0..\.venv_ppocr370\Scripts\python.exe
+    echo [ERROR] .venv_ppocr370 Python not found.
+    echo Expected location: %~dp0..\.venv_ppocr370\Scripts\python.exe
     pause
     exit /b 1
 )

@@ -38,7 +38,7 @@ def find_python() -> Path:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        ".venv_ppocr370 Python topilmadi. Kutilgan joy(lar):\n  "
+        ".venv_ppocr370 Python not found. Expected location(s):\n  "
         + "\n  ".join(str(c) for c in candidates)
     )
 
@@ -59,7 +59,7 @@ def validate_environment() -> Path:
     python_exe = find_python()
     missing = [str(path) for path in (VIN_SERVER, BARCODE_SERVER) if not path.is_file()]
     if missing:
-        raise FileNotFoundError("Server fayli topilmadi: " + ", ".join(missing))
+        raise FileNotFoundError("Server file not found: " + ", ".join(missing))
 
     occupied = []
     if not port_is_free(VIN_HOST, VIN_PORT):
@@ -67,7 +67,7 @@ def validate_environment() -> Path:
     if not port_is_free(BARCODE_HOST, BARCODE_PORT):
         occupied.append(f"Barcode port {BARCODE_HOST}:{BARCODE_PORT}")
     if occupied:
-        raise RuntimeError("Port band: " + ", ".join(occupied))
+        raise RuntimeError("Port already in use: " + ", ".join(occupied))
     return python_exe
 
 
@@ -210,8 +210,8 @@ def main() -> int:
             python_exe, BARCODE_SERVER, BARCODE_HOST, BARCODE_PORT, barcode_threads, barcode_env
         )
 
-        print("Ikkala PP-OCRv6 server is working.")
-        print("For stopping push the Ctrl+C.")
+        print("Both PP-OCRv6 servers are running.")
+        print("Press Ctrl+C to stop.")
 
         while True:
             if vin_process.poll() is not None:

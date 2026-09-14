@@ -269,7 +269,7 @@ def _log_cpu_diagnostics(cpu_threads, resize_width, use_textline_orientation):
         physical = psutil.cpu_count(logical=False) or 0
         affinity = psutil.Process().cpu_affinity()
     except ImportError:
-        physical = "N/A (psutil o'rnatilmagan)"
+        physical = "N/A (psutil not installed)"
         affinity = "N/A"
     log(f"CPU: logical={logical}  physical={physical}  cpu_threads={cpu_threads}", "MONITOR")
     log(f"RESIZE_WIDTH={resize_width}  USE_TEXTLINE_ORIENTATION={use_textline_orientation}", "MONITOR")
@@ -380,9 +380,20 @@ class OCRModel:
         log("Initializing PP-OCRv6 medium...", "INFO")
         t0 = time.monotonic()
 
+        # Default assumes the VIN server is normally running at the same
+        # time on this same PC (that's the real factory setup, whether
+        # started via Start_All_PP-OCRv6_Servers or launched standalone /
+        # by the client app). Requesting 90% here AND 90% in VIN
+        # independently would oversubscribe the CPU by ~180%, causing
+        # wildly inconsistent per-image latency (confirmed in the field:
+        # OCR calls that normally take ~2s spiking to 6-10s once both
+        # servers were actively processing at once). Set OCR_CPU_THREADS
+        # explicitly for a higher share when only this server runs alone
+        # (e.g. isolated testing) - Start_All_PP-OCRv6_Servers already
+        # does this automatically for a coordinated dual-server launch.
         base_count = effective_cpu_count or (os.cpu_count() or 1)
         cpu_threads = max(1, int(os.environ.get(
-            "OCR_CPU_THREADS", str(max(1, round(base_count * 0.90)))
+            "OCR_CPU_THREADS", str(max(1, round(base_count * 0.40)))
         )))
         _log_cpu_diagnostics(cpu_threads, RESIZE_WIDTH, USE_TEXTLINE_ORIENTATION)
 
