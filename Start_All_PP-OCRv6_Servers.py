@@ -28,6 +28,16 @@ BARCODE_HOST, BARCODE_PORT = "127.0.0.1", 65433
 VIN_RESULT_BASE = r"D:\result\vin_result"
 BARCODE_RESULT_BASE = r"D:\result\barcode_result"
 
+# Both servers already use the GPU automatically as soon as
+# paddlepaddle-gpu is installed in .venv_ppocr370 (see
+# requirements_ppocr370_gpu.txt) - roughly 10-50x faster per image in
+# testing (an RTX 5070: VIN ~1.5s->~0.2s, Barcode ~2-5s->under 0.3s even
+# worst-case). FORCE_DEVICE only needs to be touched to override that
+# auto-detection: "" (default) leaves it on auto, "cpu" forces CPU even
+# with a GPU installed (e.g. for troubleshooting), "gpu" forces GPU and
+# prints a warning instead of silently falling back if none is found.
+FORCE_DEVICE = ""
+
 
 def find_python() -> Path:
     candidates = (
@@ -197,17 +207,21 @@ def main() -> int:
     barcode_process = None
 
     try:
-        vin_env = {"VIN_RESULT_BASE": VIN_RESULT_BASE} if VIN_RESULT_BASE else None
-        barcode_env = {"BARCODE_RESULT_BASE": BARCODE_RESULT_BASE} if BARCODE_RESULT_BASE else None
+        vin_env = {"VIN_RESULT_BASE": VIN_RESULT_BASE} if VIN_RESULT_BASE else {}
+        barcode_env = {"BARCODE_RESULT_BASE": BARCODE_RESULT_BASE} if BARCODE_RESULT_BASE else {}
+        if FORCE_DEVICE:
+            vin_env["OCR_DEVICE"] = FORCE_DEVICE
+            barcode_env["OCR_DEVICE"] = FORCE_DEVICE
 
-        print(f"PP-OCRv6 VIN server is loading: 127.0.0.1:65432 (threads={vin_threads})")
+        device_label = FORCE_DEVICE.upper() if FORCE_DEVICE else "auto"
+        print(f"PP-OCRv6 VIN server is loading: 127.0.0.1:65432 (device={device_label}, threads={vin_threads})")
         vin_process = start_server(
-            python_exe, VIN_SERVER, VIN_HOST, VIN_PORT, vin_threads, vin_env
+            python_exe, VIN_SERVER, VIN_HOST, VIN_PORT, vin_threads, vin_env or None
         )
 
-        print(f"PP-OCRv6 Barcode server is loading: 127.0.0.1:65433 (threads={barcode_threads})")
+        print(f"PP-OCRv6 Barcode server is loading: 127.0.0.1:65433 (device={device_label}, threads={barcode_threads})")
         barcode_process = start_server(
-            python_exe, BARCODE_SERVER, BARCODE_HOST, BARCODE_PORT, barcode_threads, barcode_env
+            python_exe, BARCODE_SERVER, BARCODE_HOST, BARCODE_PORT, barcode_threads, barcode_env or None
         )
 
         print("Both PP-OCRv6 servers are running.")

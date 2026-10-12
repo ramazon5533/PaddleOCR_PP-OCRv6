@@ -19,8 +19,13 @@ import warnings
 # lines below can crash with UnicodeEncodeError. Harmless when run as
 # a plain script too.
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # line_buffering=True forces a flush after every print() line. Without
+    # it, stdout block-buffers whenever it isn't a real console (piped by a
+    # supervisor/Test Helper app, redirected to a log file, etc.), so every
+    # log line below - including Listening/Client connected/detect results -
+    # silently sits in the buffer and never reaches the reader.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 warnings.filterwarnings("ignore")
 os.environ["CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -38,6 +43,66 @@ logging.getLogger("paddle").setLevel(logging.ERROR)
 logging.getLogger("root").setLevel(logging.ERROR)
 # =================================================================
 # [END] SILENCER
+# =================================================================
+
+# =================================================================
+# [START] GPU / CPU DEVICE SELECTION
+# =================================================================
+# Runs on an NVIDIA GPU automatically (10-50x faster per call in testing:
+# ~1.5-2s on CPU vs ~30-50ms on GPU for the same image) as soon as
+# paddlepaddle-gpu is installed in this venv (see
+# requirements_ppocr370_gpu.txt) - no extra configuration needed, so this
+# activates correctly regardless of whether the server is started via the
+# .bat files, Start_All_PP-OCRv6_Servers.py, a Test Helper app's own
+# subprocess call, or any other launcher. Default is "auto" (use GPU if
+# found, else CPU, no warning either way). Set OCR_DEVICE=cpu to force CPU
+# even with a GPU installed, or OCR_DEVICE=gpu to force GPU and print a
+# warning instead of silently falling back if it isn't actually available.
+# Kept in sync with the copy in VIN_server_OCR_PP-OCRv6.py.
+OCR_DEVICE_REQUESTED = os.environ.get("OCR_DEVICE", "auto").strip().lower()
+
+
+def _setup_gpu_dll_path():
+    """Add the pip-installed CUDA/cuDNN DLL directories (from the
+    nvidia-* packages that paddlepaddle-gpu depends on) to PATH.
+
+    Paddle's own dynamic loader does NOT find these via
+    os.add_dll_directory alone (confirmed in testing: ctypes.WinDLL loads
+    the exact same cublas64_13.dll fine, but Paddle's internal loader
+    still fails with "not configured correctly" / error 126 unless the
+    directory is also on the classic PATH env var) - so both are set here
+    to be safe. Returns True if a GPU-enabled paddlepaddle install was
+    found in this venv, False otherwise (caller should fall back to CPU).
+    """
+    import glob
+    site_packages = os.path.join(
+        os.path.dirname(os.path.dirname(sys.executable)), "Lib", "site-packages"
+    )
+    bin_dirs = sorted(set(
+        glob.glob(os.path.join(site_packages, "nvidia", "*", "bin")) +
+        glob.glob(os.path.join(site_packages, "nvidia", "*", "bin", "x86_64"))
+    ))
+    if not bin_dirs:
+        return False
+    os.environ["PATH"] = os.pathsep.join(bin_dirs) + os.pathsep + os.environ.get("PATH", "")
+    for d in bin_dirs:
+        try:
+            os.add_dll_directory(d)
+        except (OSError, AttributeError):
+            pass
+    return True
+
+
+OCR_DEVICE = "cpu"
+if OCR_DEVICE_REQUESTED in ("gpu", "auto"):
+    if _setup_gpu_dll_path():
+        OCR_DEVICE = "gpu"
+    elif OCR_DEVICE_REQUESTED == "gpu":
+        print("[WARN] OCR_DEVICE=gpu requested but no GPU-enabled paddlepaddle "
+              "install found in this venv (see requirements_ppocr370_gpu.txt) "
+              "- falling back to CPU.")
+# =================================================================
+# [END] GPU / CPU DEVICE SELECTION
 # =================================================================
 
 import time
@@ -107,6 +172,9 @@ BARCODE_RESERVED_WORDS = {"TRIM"}
 DIRECT_ACCEPT_CONFIDENCE = 0.85
 KNOWN_CODE_ACCEPT_CONFIDENCE = 0.75
 NG_SEARCH_BUDGET_SECONDS = 4.5
+# Minimum long-edge size (px, at the RESIZE_WIDTH=800 scale) for a text box
+# to be considered a real barcode-label code. See extract_barcodes().
+MIN_BARCODE_TEXT_EXTENT = int(RESIZE_WIDTH * 0.035)
 
 
 def _load_barcode_codes():
@@ -429,6 +497,7 @@ class OCRModel:
         cpu_threads = max(1, int(os.environ.get(
             "OCR_CPU_THREADS", str(max(1, round(base_count * 0.40)))
         )))
+        log(f"Device: {OCR_DEVICE.upper()}", "MONITOR")
         _log_cpu_diagnostics(cpu_threads, RESIZE_WIDTH, USE_TEXTLINE_ORIENTATION)
 
         _devnull_fd = os.open(os.devnull, os.O_WRONLY)
@@ -440,18 +509,30 @@ class OCRModel:
         sys.stdout = open(os.devnull, 'w')
         sys.stderr = open(os.devnull, 'w')
         try:
-            self.ocr = PaddleOCR(
-                lang='en',
-                ocr_version='PP-OCRv6',
-                text_detection_model_name='PP-OCRv6_medium_det',
-                text_recognition_model_name='PP-OCRv6_medium_rec',
-                use_doc_unwarping=False,
-                use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-                textline_orientation_model_name='PP-LCNet_x0_25_textline_ori',
-                cpu_threads=cpu_threads,
-                enable_mkldnn=True, # CPU acceleration
-                device='cpu',
-            )
+            if OCR_DEVICE == "gpu":
+                self.ocr = PaddleOCR(
+                    lang='en',
+                    ocr_version='PP-OCRv6',
+                    text_detection_model_name='PP-OCRv6_medium_det',
+                    text_recognition_model_name='PP-OCRv6_medium_rec',
+                    use_doc_unwarping=False,
+                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+                    textline_orientation_model_name='PP-LCNet_x0_25_textline_ori',
+                    device='gpu',
+                )
+            else:
+                self.ocr = PaddleOCR(
+                    lang='en',
+                    ocr_version='PP-OCRv6',
+                    text_detection_model_name='PP-OCRv6_medium_det',
+                    text_recognition_model_name='PP-OCRv6_medium_rec',
+                    use_doc_unwarping=False,
+                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+                    textline_orientation_model_name='PP-LCNet_x0_25_textline_ori',
+                    cpu_threads=cpu_threads,
+                    enable_mkldnn=True, # CPU acceleration
+                    device='cpu',
+                )
         finally:
             sys.stdout.close()
             sys.stderr.close()
@@ -628,8 +709,27 @@ class OCRModel:
                         or code in seen):
                     continue
 
-                seen.add(code)
                 position = self._get_position(det_polys, i)
+
+                # Reject any text box far smaller than a real barcode-label
+                # code. Barcode code text is deliberately printed large for
+                # scanner readability (measured 46-70px long edge at this
+                # 800px resize scale across every confirmed real code in
+                # the field). A 2D DataMatrix/serial tag's small header
+                # text, a body/chassis stamp, or other incidental print
+                # renders far smaller (confirmed: 'SV1' from a DataMatrix
+                # serial tag measured only 18px - well under half the
+                # smallest genuine code - and was otherwise accepted as a
+                # false barcode merged alongside a real one elsewhere in
+                # frame). Without this, confidence/repeat-sighting checks
+                # alone can't catch it: the text is read correctly and
+                # consistently, it just isn't a barcode code.
+                box_w, box_h = position[2] - position[0], position[3] - position[1]
+                if max(box_w, box_h) < MIN_BARCODE_TEXT_EXTENT:
+                    log(f"Rejected (text too small for a barcode code): '{code}' ({box_w}x{box_h}px)", "WARN")
+                    continue
+
+                seen.add(code)
                 candidates.append({"label": code, "confidence": float(score), "position": position, "stage": stage_label, "known": code in KNOWN_BARCODE_CODES, "deskew_angle": deskew_angle})
                 conf_color = Colors.BRIGHT_GREEN if score > 0.9 else Colors.BRIGHT_YELLOW
                 log(f"Barcode ({stage_label}): {Colors.BRIGHT_WHITE}'{code}'{Colors.RESET} | {conf_color}{score:.3f}{Colors.RESET}", "VIN")
@@ -646,11 +746,11 @@ class OCRModel:
 
     def _order_barcode_pair(self, first, second, image_shape):
         """Order two barcodes found in the SAME OCR pass: side-by-side ->
-        rightmost first; stacked -> topmost first."""
+        leftmost first; stacked -> topmost first."""
         ax, ay = self._center_in_normal_view(first, image_shape)
         bx, by = self._center_in_normal_view(second, image_shape)
         if abs(ax - bx) >= abs(ay - by):
-            return (first, second) if ax >= bx else (second, first)
+            return (first, second) if ax <= bx else (second, first)
         return (first, second) if ay <= by else (second, first)
 
     def _center_in_normal_view(self, candidate, proc_shape):

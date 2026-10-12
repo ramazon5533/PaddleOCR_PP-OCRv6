@@ -14,6 +14,11 @@ rem D:), set the path below. Delete/comment this line to go back to the
 rem automatic same-drive default.
 if not defined BARCODE_RESULT_BASE set "BARCODE_RESULT_BASE=D:\result\barcode_result"
 
+rem The server uses the GPU automatically as soon as paddlepaddle-gpu is
+rem installed in .venv_ppocr370 (see requirements_ppocr370_gpu.txt) - no
+rem setting needed here. To force CPU even with a GPU installed, uncomment:
+rem set OCR_DEVICE=cpu
+
 cd /d "%~dp0"
 set "PYTHON_EXE=%~dp0..\.venv_ppocr370\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%~dp0..\..\.venv_ppocr370\Scripts\python.exe"

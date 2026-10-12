@@ -18,8 +18,13 @@ import warnings
 # lines below can crash with UnicodeEncodeError. Harmless when run as
 # a plain script too.
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # line_buffering=True forces a flush after every print() line. Without
+    # it, stdout block-buffers whenever it isn't a real console (piped by a
+    # supervisor/Test Helper app, redirected to a log file, etc.), so every
+    # log line below - including Listening/Client connected/detect results -
+    # silently sits in the buffer and never reaches the reader.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 warnings.filterwarnings("ignore")
 os.environ["CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -37,6 +42,65 @@ logging.getLogger("paddle").setLevel(logging.ERROR)
 logging.getLogger("root").setLevel(logging.ERROR)
 # =================================================================
 # [END] SILENCER
+# =================================================================
+
+# =================================================================
+# [START] GPU / CPU DEVICE SELECTION
+# =================================================================
+# Runs on an NVIDIA GPU automatically (10-50x faster per call in testing:
+# ~1.5s on CPU vs ~30-60ms on GPU for the same image) as soon as
+# paddlepaddle-gpu is installed in this venv (see
+# requirements_ppocr370_gpu.txt) - no extra configuration needed, so this
+# activates correctly regardless of whether the server is started via the
+# .bat files, Start_All_PP-OCRv6_Servers.py, a Test Helper app's own
+# subprocess call, or any other launcher. Default is "auto" (use GPU if
+# found, else CPU, no warning either way). Set OCR_DEVICE=cpu to force CPU
+# even with a GPU installed, or OCR_DEVICE=gpu to force GPU and print a
+# warning instead of silently falling back if it isn't actually available.
+OCR_DEVICE_REQUESTED = os.environ.get("OCR_DEVICE", "auto").strip().lower()
+
+
+def _setup_gpu_dll_path():
+    """Add the pip-installed CUDA/cuDNN DLL directories (from the
+    nvidia-* packages that paddlepaddle-gpu depends on) to PATH.
+
+    Paddle's own dynamic loader does NOT find these via
+    os.add_dll_directory alone (confirmed in testing: ctypes.WinDLL loads
+    the exact same cublas64_13.dll fine, but Paddle's internal loader
+    still fails with "not configured correctly" / error 126 unless the
+    directory is also on the classic PATH env var) - so both are set here
+    to be safe. Returns True if a GPU-enabled paddlepaddle install was
+    found in this venv, False otherwise (caller should fall back to CPU).
+    """
+    import glob
+    site_packages = os.path.join(
+        os.path.dirname(os.path.dirname(sys.executable)), "Lib", "site-packages"
+    )
+    bin_dirs = sorted(set(
+        glob.glob(os.path.join(site_packages, "nvidia", "*", "bin")) +
+        glob.glob(os.path.join(site_packages, "nvidia", "*", "bin", "x86_64"))
+    ))
+    if not bin_dirs:
+        return False
+    os.environ["PATH"] = os.pathsep.join(bin_dirs) + os.pathsep + os.environ.get("PATH", "")
+    for d in bin_dirs:
+        try:
+            os.add_dll_directory(d)
+        except (OSError, AttributeError):
+            pass
+    return True
+
+
+OCR_DEVICE = "cpu"
+if OCR_DEVICE_REQUESTED in ("gpu", "auto"):
+    if _setup_gpu_dll_path():
+        OCR_DEVICE = "gpu"
+    elif OCR_DEVICE_REQUESTED == "gpu":
+        print("[WARN] OCR_DEVICE=gpu requested but no GPU-enabled paddlepaddle "
+              "install found in this venv (see requirements_ppocr370_gpu.txt) "
+              "- falling back to CPU.")
+# =================================================================
+# [END] GPU / CPU DEVICE SELECTION
 # =================================================================
 
 import time
@@ -387,6 +451,7 @@ class OCRModel:
         cpu_threads = max(1, int(os.environ.get(
             "OCR_CPU_THREADS", str(max(1, round(base_count * 0.50)))
         )))
+        log(f"Device: {OCR_DEVICE.upper()}", "MONITOR")
         _log_cpu_diagnostics(cpu_threads, RESIZE_WIDTH, USE_TEXTLINE_ORIENTATION)
 
         _devnull_fd = os.open(os.devnull, os.O_WRONLY)
@@ -407,18 +472,22 @@ class OCRModel:
             # manufacturer text, ...) - that unconditional full-label
             # recognition was the main cause of slow (7-10s) detections
             # on text-heavy labels, independent of CPU/thread tuning.
-            self.det = TextDetection(
-                model_name='PP-OCRv6_medium_det',
-                cpu_threads=cpu_threads,
-                enable_mkldnn=True,
-                device='cpu',
-            )
-            self.rec = TextRecognition(
-                model_name='PP-OCRv6_medium_rec',
-                cpu_threads=cpu_threads,
-                enable_mkldnn=True,
-                device='cpu',
-            )
+            if OCR_DEVICE == "gpu":
+                self.det = TextDetection(model_name='PP-OCRv6_medium_det', device='gpu')
+                self.rec = TextRecognition(model_name='PP-OCRv6_medium_rec', device='gpu')
+            else:
+                self.det = TextDetection(
+                    model_name='PP-OCRv6_medium_det',
+                    cpu_threads=cpu_threads,
+                    enable_mkldnn=True,
+                    device='cpu',
+                )
+                self.rec = TextRecognition(
+                    model_name='PP-OCRv6_medium_rec',
+                    cpu_threads=cpu_threads,
+                    enable_mkldnn=True,
+                    device='cpu',
+                )
         finally:
             sys.stdout.close()
             sys.stderr.close()
