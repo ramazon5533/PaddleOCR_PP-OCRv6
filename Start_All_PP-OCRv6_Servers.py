@@ -290,7 +290,16 @@ def start_server_with_retry(
             print(f"[WARN] {label} did not start cleanly (attempt {attempt}/{max_attempts}): {exc}")
             stop_process(process, own_console=own_console)
             if attempt < max_attempts:
-                time.sleep(1.5)
+                # A crashed CUDA process seems to need a few seconds for
+                # the GPU driver to fully release its context/memory
+                # before a new one can be created cleanly - retrying
+                # near-instantly (the original 1.5s) left some retries
+                # failing for the same reason as the attempt before them.
+                # Growing the wait each time (4s, 6s, 8s, ...) gives the
+                # driver more room to settle on a run that needs several
+                # attempts, without slowing down the common case where
+                # the very next attempt already succeeds.
+                time.sleep(2.0 + attempt * 2.0)
     raise RuntimeError(f"{label} failed to start after {max_attempts} attempts: {last_error}")
 
 
