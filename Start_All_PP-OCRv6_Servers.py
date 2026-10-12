@@ -53,16 +53,50 @@ def find_python() -> Path:
     )
 
 
-def port_is_free(host: str, port: int) -> bool:
+def is_listening(host: str, port: int) -> bool:
+    """True if something is actively accepting TCP connections on
+    host:port. Binding a test socket to check this (with SO_REUSEADDR)
+    does NOT work on Windows: SO_REUSEADDR there lets a second socket
+    bind successfully over a port another socket is already listening on
+    (confirmed in testing - that approach kept reporting the port "free"
+    long after VIN was actually listening, so a bind-based wait loop
+    never returned), so an actual connect attempt is the only reliable
+    way to detect "is this server up" here.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((host, port))
+        sock.settimeout(0.5)
+        sock.connect((host, port))
         return True
     except OSError:
         return False
     finally:
         sock.close()
+
+
+def wait_until_listening(
+    process: subprocess.Popen, host: str, port: int, label: str, timeout: float = 120.0
+) -> None:
+    """Block until `process` is listening on host:port (its model finished
+    loading and warming up), it exits early (crash), or `timeout` elapses.
+
+    On GPU, starting the VIN and Barcode processes back-to-back used to let
+    both begin CUDA/cuDNN initialization at almost the same instant, which
+    crashed one or both of them with an access violation inside Paddle's
+    own phi.dll (confirmed via Windows Event Viewer - Faulting module:
+    phi.dll, Exception code: 0xc0000005). Waiting for the first process to
+    finish loading before starting the second avoids that race entirely;
+    it only adds a few seconds total since model load is fast, and has no
+    effect in CPU mode beyond that same short, harmless wait.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"{label} exited during startup. Exit code: {process.returncode}")
+        if is_listening(host, port):
+            return
+        time.sleep(0.5)
+    raise RuntimeError(f"{label} did not start listening on {host}:{port} within {timeout:.0f}s")
 
 
 def validate_environment() -> Path:
@@ -72,9 +106,9 @@ def validate_environment() -> Path:
         raise FileNotFoundError("Server file not found: " + ", ".join(missing))
 
     occupied = []
-    if not port_is_free(VIN_HOST, VIN_PORT):
+    if is_listening(VIN_HOST, VIN_PORT):
         occupied.append(f"VIN port {VIN_HOST}:{VIN_PORT}")
-    if not port_is_free(BARCODE_HOST, BARCODE_PORT):
+    if is_listening(BARCODE_HOST, BARCODE_PORT):
         occupied.append(f"Barcode port {BARCODE_HOST}:{BARCODE_PORT}")
     if occupied:
         raise RuntimeError("Port already in use: " + ", ".join(occupied))
@@ -162,9 +196,22 @@ def split_thread_counts() -> tuple[int, int]:
     return vin_threads, barcode_threads
 
 
+def _gpu_will_be_used(python_exe: Path) -> bool:
+    """Mirror the servers' own OCR_DEVICE auto-detection (see
+    VIN_server_OCR_PP-OCRv6.py / BARCODE_server_OCR_PP-OCRv6.py) so this
+    script knows, before launching anything, whether the children will end
+    up running on the GPU."""
+    requested = (FORCE_DEVICE or "auto").strip().lower()
+    if requested == "cpu":
+        return False
+    venv_dir = python_exe.parent.parent
+    nvidia_dir = venv_dir / "Lib" / "site-packages" / "nvidia"
+    return nvidia_dir.is_dir() and any(nvidia_dir.glob("*/bin"))
+
+
 def start_server(
     python_exe: Path, script: Path, host: str, port: int, cpu_threads: int,
-    extra_env: dict[str, str] | None = None,
+    extra_env: dict[str, str] | None = None, own_console: bool = True,
 ) -> subprocess.Popen:
     environment = os.environ.copy()
     environment["OCR_CPU_THREADS"] = str(cpu_threads)
@@ -172,7 +219,25 @@ def start_server(
     if extra_env:
         environment.update(extra_env)
 
-    creationflags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
+    if os.name != "nt":
+        creationflags = 0
+    elif own_console:
+        creationflags = subprocess.CREATE_NEW_CONSOLE
+    else:
+        # A genuinely separate console/process-group crashes CUDA/cuDNN
+        # init on this GPU/driver combo (confirmed via Windows Event
+        # Viewer: an 0xC0000005 access violation inside paddle's own
+        # phi.dll). This is 100% reproducible whenever the child doesn't
+        # share the parent's exact console - tried and all crashed:
+        # CREATE_NEW_CONSOLE (visible or -WindowStyle Hidden) and even
+        # CREATE_NEW_PROCESS_GROUP alone (no new console, just its own
+        # process group) all crash it. Only plain inheritance (flags=0,
+        # same as Start-Process -NoNewWindow) is safe, so that's used
+        # here - stop_process() below falls back to terminate() instead
+        # of CTRL_BREAK_EVENT for a child started this way, since without
+        # its own process group that signal would also hit this launcher.
+        creationflags = 0
+
     return subprocess.Popen(
         [str(python_exe), str(script), "--host", host, "--port", str(port)],
         cwd=str(BASE_DIR),
@@ -181,11 +246,11 @@ def start_server(
     )
 
 
-def stop_process(process: subprocess.Popen | None) -> None:
+def stop_process(process: subprocess.Popen | None, own_console: bool = True) -> None:
     if process is None or process.poll() is not None:
         return
     try:
-        if os.name == "nt":
+        if os.name == "nt" and own_console:
             process.send_signal(signal.CTRL_BREAK_EVENT)
         else:
             process.terminate()
@@ -205,6 +270,7 @@ def main() -> int:
     vin_threads, barcode_threads = split_thread_counts()
     vin_process = None
     barcode_process = None
+    gpu_active = _gpu_will_be_used(python_exe)
 
     try:
         vin_env = {"VIN_RESULT_BASE": VIN_RESULT_BASE} if VIN_RESULT_BASE else {}
@@ -213,15 +279,25 @@ def main() -> int:
             vin_env["OCR_DEVICE"] = FORCE_DEVICE
             barcode_env["OCR_DEVICE"] = FORCE_DEVICE
 
-        device_label = FORCE_DEVICE.upper() if FORCE_DEVICE else "auto"
+        device_label = FORCE_DEVICE.upper() if FORCE_DEVICE else ("GPU" if gpu_active else "auto")
+        if gpu_active:
+            print("GPU detected - VIN and Barcode will share THIS console window "
+                  "(a separate window per server crashes GPU init on this driver; "
+                  "see start_server() for details). Their logs will interleave below.")
+
         print(f"PP-OCRv6 VIN server is loading: 127.0.0.1:65432 (device={device_label}, threads={vin_threads})")
         vin_process = start_server(
-            python_exe, VIN_SERVER, VIN_HOST, VIN_PORT, vin_threads, vin_env or None
+            python_exe, VIN_SERVER, VIN_HOST, VIN_PORT, vin_threads, vin_env or None,
+            own_console=not gpu_active,
         )
+        # Wait for VIN to finish loading before starting Barcode - see
+        # wait_until_listening() for why (GPU init race between the two).
+        wait_until_listening(vin_process, VIN_HOST, VIN_PORT, "VIN server")
 
         print(f"PP-OCRv6 Barcode server is loading: 127.0.0.1:65433 (device={device_label}, threads={barcode_threads})")
         barcode_process = start_server(
-            python_exe, BARCODE_SERVER, BARCODE_HOST, BARCODE_PORT, barcode_threads, barcode_env or None
+            python_exe, BARCODE_SERVER, BARCODE_HOST, BARCODE_PORT, barcode_threads, barcode_env or None,
+            own_console=not gpu_active,
         )
 
         print("Both PP-OCRv6 servers are running.")
@@ -243,8 +319,8 @@ def main() -> int:
     except Exception as exc:
         print(f"[SERVER ERROR] {exc}")
     finally:
-        stop_process(vin_process)
-        stop_process(barcode_process)
+        stop_process(vin_process, own_console=not gpu_active)
+        stop_process(barcode_process, own_console=not gpu_active)
 
     return 0
 
