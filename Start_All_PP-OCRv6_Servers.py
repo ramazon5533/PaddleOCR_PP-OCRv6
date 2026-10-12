@@ -224,18 +224,23 @@ def start_server(
     elif own_console:
         creationflags = subprocess.CREATE_NEW_CONSOLE
     else:
-        # A genuinely separate console/process-group crashes CUDA/cuDNN
-        # init on this GPU/driver combo (confirmed via Windows Event
-        # Viewer: an 0xC0000005 access violation inside paddle's own
-        # phi.dll). This is 100% reproducible whenever the child doesn't
-        # share the parent's exact console - tried and all crashed:
-        # CREATE_NEW_CONSOLE (visible or -WindowStyle Hidden) and even
-        # CREATE_NEW_PROCESS_GROUP alone (no new console, just its own
-        # process group) all crash it. Only plain inheritance (flags=0,
-        # same as Start-Process -NoNewWindow) is safe, so that's used
-        # here - stop_process() below falls back to terminate() instead
-        # of CTRL_BREAK_EVENT for a child started this way, since without
-        # its own process group that signal would also hit this launcher.
+        # A genuinely separate console/process-group reliably crashes
+        # CUDA/cuDNN init on this GPU/driver combo (confirmed via Windows
+        # Event Viewer: an 0xC0000005 access violation inside paddle's own
+        # phi.dll) - CREATE_NEW_CONSOLE (visible or -WindowStyle Hidden)
+        # and even CREATE_NEW_PROCESS_GROUP alone (no new console, just
+        # its own process group) all crash it every time. Plain
+        # inheritance (flags=0, same as Start-Process -NoNewWindow) fixes
+        # that, but does NOT fully eliminate a separate, intermittent
+        # crash at CUDA init that still happens some of the time even
+        # with a shared console (looks like a lower-level driver
+        # race/instability on this bleeding-edge GPU+driver+CUDA13
+        # combination, not something fixable from this script) - that
+        # residual failure is handled by the retry loop in
+        # start_server_with_retry() below. stop_process() below falls
+        # back to terminate() instead of CTRL_BREAK_EVENT for a child
+        # started this way, since without its own process group that
+        # signal would also hit this launcher.
         creationflags = 0
 
     return subprocess.Popen(
@@ -257,6 +262,36 @@ def stop_process(process: subprocess.Popen | None, own_console: bool = True) -> 
         process.wait(timeout=3)
     except Exception:
         process.kill()
+
+
+def start_server_with_retry(
+    python_exe: Path, script: Path, host: str, port: int, cpu_threads: int,
+    extra_env: dict[str, str] | None, own_console: bool, label: str, max_attempts: int = 6,
+) -> subprocess.Popen:
+    """start_server() + wait_until_listening(), retrying the whole launch
+    a few times if the process fails during CUDA init (see the GPU
+    comment in start_server() - that failure is intermittent even with a
+    shared console and not something fixable here; confirmed in testing
+    to show up as either the 0xC0000005 crash in phi.dll or a clean
+    "InvalidArgumentError: The GPU stream is nullptr" exception, with no
+    single cause nailed down, just general instability in this very new
+    GPU+driver+CUDA13 combination). It only ever happens during this
+    initial startup window though - once a server is listening it has
+    been stable every time in testing - so retrying is safe, and 1-3
+    attempts was enough to get a clean run every time in testing."""
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        process = start_server(python_exe, script, host, port, cpu_threads, extra_env, own_console)
+        try:
+            wait_until_listening(process, host, port, label)
+            return process
+        except RuntimeError as exc:
+            last_error = exc
+            print(f"[WARN] {label} did not start cleanly (attempt {attempt}/{max_attempts}): {exc}")
+            stop_process(process, own_console=own_console)
+            if attempt < max_attempts:
+                time.sleep(1.5)
+    raise RuntimeError(f"{label} failed to start after {max_attempts} attempts: {last_error}")
 
 
 def main() -> int:
@@ -286,18 +321,18 @@ def main() -> int:
                   "see start_server() for details). Their logs will interleave below.")
 
         print(f"PP-OCRv6 VIN server is loading: 127.0.0.1:65432 (device={device_label}, threads={vin_threads})")
-        vin_process = start_server(
+        # Waits for VIN to finish loading (and retries if it crashes
+        # during startup - see start_server_with_retry()) before Barcode
+        # is started, so the two never both initialize CUDA at once.
+        vin_process = start_server_with_retry(
             python_exe, VIN_SERVER, VIN_HOST, VIN_PORT, vin_threads, vin_env or None,
-            own_console=not gpu_active,
+            not gpu_active, "VIN server",
         )
-        # Wait for VIN to finish loading before starting Barcode - see
-        # wait_until_listening() for why (GPU init race between the two).
-        wait_until_listening(vin_process, VIN_HOST, VIN_PORT, "VIN server")
 
         print(f"PP-OCRv6 Barcode server is loading: 127.0.0.1:65433 (device={device_label}, threads={barcode_threads})")
-        barcode_process = start_server(
+        barcode_process = start_server_with_retry(
             python_exe, BARCODE_SERVER, BARCODE_HOST, BARCODE_PORT, barcode_threads, barcode_env or None,
-            own_console=not gpu_active,
+            not gpu_active, "Barcode server",
         )
 
         print("Both PP-OCRv6 servers are running.")
