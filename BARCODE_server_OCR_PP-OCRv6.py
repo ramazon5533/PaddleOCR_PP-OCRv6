@@ -207,6 +207,40 @@ def _load_barcode_codes():
 
 KNOWN_BARCODE_CODES, BARCODE_CODES_PATH = _load_barcode_codes()
 
+# Where a confidently-detected code that is NOT yet in barcode_codes.json
+# gets recorded for human review. This never writes to barcode_codes.json
+# itself and never changes KNOWN_BARCODE_CODES at runtime - a wrong OCR
+# read must never silently become "known" and start short-circuiting
+# future fallback checks. A person reviews this file periodically and
+# copies real codes into barcode_codes.json by hand, then restarts the
+# server (see _load_barcode_codes above - it only loads once at startup).
+NEW_CANDIDATES_FILE = (
+    BARCODE_CODES_PATH.parent if BARCODE_CODES_PATH else Path(__file__).resolve().parent
+) / "new_barcode_candidates.json"
+
+
+def _log_new_barcode_candidate(code, confidence, stage):
+    """Record one sighting of an unknown code (count/confidence/timestamps),
+    merging with any prior sighting of the same code instead of appending
+    duplicate rows."""
+    try:
+        if NEW_CANDIDATES_FILE.exists():
+            data = json.loads(NEW_CANDIDATES_FILE.read_text(encoding="utf-8"))
+        else:
+            data = {}
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = data.get(code, {})
+        entry["count"] = entry.get("count", 0) + 1
+        entry["max_confidence"] = max(entry.get("max_confidence", 0.0), float(confidence))
+        entry["last_seen"] = now_str
+        entry["last_stage"] = stage
+        entry.setdefault("first_seen", now_str)
+        data[code] = entry
+        NEW_CANDIDATES_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except (OSError, ValueError, TypeError) as e:
+        log(f"Failed to log new barcode candidate '{code}': {e}", "WARN")
+
+
 # Confirmed OCR confusions for the small vertical LSS label.
 # Keep this list narrow: general fuzzy matching could create false OK results.
 BARCODE_OCR_ALIASES = {
@@ -1191,6 +1225,7 @@ class OCRModel:
         if best is not None:
             final_label = best['label']
             final_confidence = best['confidence']
+            second = None
 
             # ── Two barcodes in one frame ──
             # Merge in a second code only when it was found in the SAME
@@ -1216,6 +1251,16 @@ class OCRModel:
                     log(f"Two barcodes detected: {Colors.BRIGHT_GREEN}{final_label}{Colors.RESET}", "SUCCESS")
 
             log(f"Best Barcode: {Colors.BRIGHT_GREEN}{final_label}{Colors.RESET} | {final_confidence:.3f} | {best['stage']}", "SUCCESS")
+
+            # A confidently-accepted code not yet in barcode_codes.json is
+            # recorded for human review - it never gets auto-added to the
+            # trusted whitelist itself (see NEW_CANDIDATES_FILE comment).
+            for code_candidate in (best, second):
+                if code_candidate is not None and not code_candidate['known']:
+                    _log_new_barcode_candidate(
+                        code_candidate['label'], code_candidate['confidence'], code_candidate['stage']
+                    )
+
             results_list = [{"label": final_label, "confidence": final_confidence,
                              "stage": best['stage'], "known": best.get('known', False)}]
             self._save_result("OK", final_label, final_confidence, best['stage'])
@@ -1237,6 +1282,13 @@ if __name__ == "__main__":
         log("Known barcode codes: NONE FOUND - every detection will run all rotation "
             "fallbacks even for a confident match (slow). Put barcode_codes.json next "
             "to this script or set BARCODE_CODES_FILE.", "WARN")
+    if NEW_CANDIDATES_FILE.exists():
+        try:
+            _pending = len(json.loads(NEW_CANDIDATES_FILE.read_text(encoding="utf-8")))
+            if _pending:
+                log(f"New barcode candidates awaiting review: {_pending} in {NEW_CANDIDATES_FILE}", "WARN")
+        except (OSError, ValueError, TypeError):
+            pass
     effective_cores = _apply_cpu_affinity()
 
     model = OCRModel(effective_cores)

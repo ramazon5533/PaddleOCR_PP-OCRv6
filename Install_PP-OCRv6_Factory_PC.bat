@@ -11,6 +11,12 @@ echo This script must be run as Administrator, on a fresh PC that
 echo already has the PaddleOCR_PP-OCRv6 project files copied into
 echo the OCR_System folder (see the installation manual, Step 4).
 echo.
+echo If this PC has an NVIDIA GPU, install its driver FIRST (from
+echo nvidia.com/drivers) before running this script, so GPU mode is
+echo detected and enabled automatically below. If there is no GPU,
+echo just run this script as-is - it installs CPU-only mode and the
+echo servers work correctly, just slower per image.
+echo.
 
 rem ---- 0. Require Administrator ----
 net session >nul 2>&1
@@ -31,6 +37,7 @@ echo Using OCR_System folder: %BASE%
 echo.
 set "VENV=%BASE%\.venv_ppocr370"
 set "REQ=%BASE%\requirements_ppocr370.txt"
+set "REQ_GPU=%BASE%\requirements_ppocr370_gpu.txt"
 set "TMP=%TEMP%\ppocrv6_setup"
 if not exist "%TMP%" mkdir "%TMP%" >nul 2>&1
 
@@ -46,7 +53,7 @@ if errorlevel 1 (
 rem ============================================================
 rem  1. Windows power plan -^> High performance
 rem ============================================================
-echo [1/6] Setting Windows power plan to High performance...
+echo [1/7] Setting Windows power plan to High performance...
 powercfg /setactive scheme_min >nul 2>&1
 echo   Done.
 echo.
@@ -54,7 +61,7 @@ echo.
 rem ============================================================
 rem  2. Check that the project files were already copied
 rem ============================================================
-echo [2/6] Checking project files in %BASE% ...
+echo [2/7] Checking project files in %BASE% ...
 if not exist "%REQ%" (
     echo [ERROR] Not found: %REQ%
     echo Copy the PaddleOCR_PP-OCRv6 folder, barcode_codes.json and
@@ -67,6 +74,10 @@ if not exist "%BASE%\PaddleOCR_PP-OCRv6\VIN_server_OCR_PP-OCRv6.py" (
     echo Copy the PaddleOCR_PP-OCRv6 folder into %BASE% BEFORE running this script.
     pause
     exit /b 1
+)
+if not exist "%REQ_GPU%" (
+    echo [WARN] Not found: %REQ_GPU%
+    echo GPU mode will be skipped later even if an NVIDIA GPU is detected.
 )
 if not exist "%BASE%\PaddleOCR_PP-OCRv6\barcode_codes.json" (
     if exist "%BASE%\barcode_codes.json" (
@@ -87,7 +98,7 @@ echo.
 rem ============================================================
 rem  3. Check / install Python 3.11.8 64-bit
 rem ============================================================
-echo [3/6] Checking Python 3.11.8 (64-bit)...
+echo [3/7] Checking Python 3.11.8 (64-bit)...
 set "PYVER="
 for /f "tokens=2 delims= " %%v in ('py -3.11 --version 2^>^&1') do set "PYVER=%%v"
 
@@ -119,7 +130,7 @@ echo.
 rem ============================================================
 rem  4. Install Microsoft Visual C++ Redistributable (x64)
 rem ============================================================
-echo [4/6] Installing Microsoft Visual C++ Redistributable ^(x64^)...
+echo [4/7] Installing Microsoft Visual C++ Redistributable ^(x64^)...
 curl -L --fail -o "%TMP%\vc_redist.x64.exe" "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 if exist "%TMP%\vc_redist.x64.exe" (
     start /wait "" "%TMP%\vc_redist.x64.exe" /install /quiet /norestart
@@ -131,9 +142,9 @@ if exist "%TMP%\vc_redist.x64.exe" (
 echo.
 
 rem ============================================================
-rem  5. Create virtual environment and install packages
+rem  5. Create virtual environment and install base (CPU) packages
 rem ============================================================
-echo [5/6] Creating virtual environment and installing packages...
+echo [5/7] Creating virtual environment and installing packages...
 if not exist "%VENV%\Scripts\python.exe" (
     py -3.11 -m venv "%VENV%"
 )
@@ -149,27 +160,81 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+echo   OK - CPU packages installed. This is the safe baseline; GPU is
+echo   layered on top of it next if the hardware/driver allow, with
+echo   automatic rollback to this working CPU state if anything about
+echo   the GPU path fails.
 echo.
 
 rem ============================================================
-rem  6. Verify installed versions
+rem  6. Detect NVIDIA GPU and upgrade to GPU mode if possible
 rem ============================================================
-echo [6/6] Verifying installed versions...
+echo [6/7] Checking for an NVIDIA GPU...
+set "GPU_MODE=0"
+nvidia-smi -L >"%TMP%\gpu_list.txt" 2>nul
+if errorlevel 1 (
+    set "HAS_NV_CARD="
+    for /f "delims=" %%n in ('powershell -NoProfile -Command "(Get-CimInstance Win32_VideoController).Name" 2^>nul ^| findstr /i "NVIDIA"') do set "HAS_NV_CARD=%%n"
+    if defined HAS_NV_CARD (
+        echo   NVIDIA GPU hardware found ^(!HAS_NV_CARD!^), but no working driver
+        echo   ^(nvidia-smi failed^). Install the driver from nvidia.com/drivers,
+        echo   then re-run this script to enable GPU mode. Continuing in CPU mode
+        echo   for now.
+    ) else (
+        echo   No NVIDIA GPU detected - continuing in CPU mode ^(this is correct
+        echo   for a PC with no dedicated GPU^).
+    )
+) else (
+    if not exist "%REQ_GPU%" (
+        echo   NVIDIA GPU detected, but %REQ_GPU% is missing - staying in CPU mode.
+    ) else (
+        for /f "delims=" %%g in ("%TMP%\gpu_list.txt") do echo   Detected: %%g
+        echo   Installing GPU-enabled PaddlePaddle ^(this can take a few minutes^)...
+        "%VENV%\Scripts\python.exe" -m pip uninstall -y paddlepaddle >nul 2>&1
+        "%VENV%\Scripts\python.exe" -m pip install paddlepaddle-gpu==3.4.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.org/simple
+        if errorlevel 1 (
+            echo   [WARN] GPU package install failed ^(check internet^) - rolling
+            echo   back to CPU mode so the servers still work.
+            "%VENV%\Scripts\python.exe" -m pip install paddlepaddle==3.1.1
+        ) else (
+            "%VENV%\Scripts\python.exe" -m pip install -r "%REQ_GPU%"
+            echo   Verifying the GPU actually works on this hardware/driver...
+            "%VENV%\Scripts\python.exe" -c "import paddle; paddle.utils.run_check()" >"%TMP%\gpu_check.txt" 2>&1
+            findstr /c:"PaddlePaddle is installed successfully" "%TMP%\gpu_check.txt" >nul
+            if errorlevel 1 (
+                echo   [WARN] GPU detected but failed the runtime check ^(driver/GPU
+                echo   not compatible with this build^) - rolling back to CPU mode so
+                echo   the servers still work correctly. Details saved to:
+                echo     %TMP%\gpu_check.txt
+                "%VENV%\Scripts\python.exe" -m pip uninstall -y paddlepaddle-gpu >nul 2>&1
+                "%VENV%\Scripts\python.exe" -m pip install paddlepaddle==3.1.1
+            ) else (
+                echo   OK - GPU mode confirmed working. The servers will use it
+                echo   automatically from now on, no further configuration needed.
+                set "GPU_MODE=1"
+            )
+        )
+    )
+)
+echo.
+
+rem ============================================================
+rem  7. Verify installed versions
+rem ============================================================
+echo [7/7] Verifying installed versions...
 echo.
 "%VENV%\Scripts\python.exe" -c "import sys,paddle,paddleocr,paddlex,cv2,numpy; print('Python      ',sys.version.split()[0]); print('PaddlePaddle',paddle.__version__); print('PaddleOCR   ',paddleocr.__version__); print('PaddleX     ',paddlex.__version__); print('OpenCV      ',cv2.__version__); print('NumPy       ',numpy.__version__)"
 echo.
 echo ============================================================
 echo  Setup finished.
 echo.
-echo  Expected versions:
-echo    Python       3.11.8
-echo    PaddlePaddle 3.1.1
-echo    PaddleOCR    3.7.0
-echo    PaddleX      3.7.2
-echo    OpenCV       4.10.0
-echo    NumPy        2.2.6
+if "%GPU_MODE%"=="1" (
+    echo  Mode: GPU  ^(paddlepaddle-gpu 3.4.0 - confirmed working on this PC^)
+) else (
+    echo  Mode: CPU  ^(paddlepaddle 3.1.1^)
+)
 echo.
-echo  If the versions above match, start the servers with:
+echo  If the versions above look reasonable, start the servers with:
 echo    %BASE%\PaddleOCR_PP-OCRv6\Start_All_PP-OCRv6_Servers.bat
 echo.
 echo  The FIRST server start needs internet access to download the
